@@ -1,20 +1,142 @@
+#include <zlib.h>
+#include "kseq.h"
+#include "bamcat.h"
+
+#include <cassert>
+#include <algorithm>
 #include <map>
 #include <iostream>
 #include <fstream>
 #include <sstream>
 #include <math.h>       /* ceil */
 
-#include <zlib.h>
-#include "kseq.h"
-#include "bamcat.h"
-
 KSEQ_INIT(gzFile, gzread)
+
+static
+int32_t
+Nucl2Int(char nucl) {
+  switch (nucl) {
+    case 'a':
+      return 0;
+    case 'c':
+      return 1;
+    case 'g':
+      return 2;
+    case 't':
+      return 3;
+    default:
+      assert(false);
+  }
+}
+
+//If prefix_len is negative -- go back in the string
+static
+int32_t
+Convert2Int(const char* seq, int32_t prefix_len) {
+  assert(prefix_len != 0 && std::abs(prefix_len) < 16);
+  int32_t ans = 0;
+  if (prefix_len > 0) {
+    for (int32_t i = 0; i < prefix_len; ++i) {
+      assert(seq[i] != '\0');
+      ans = (ans << 2) | Nucl2Int(seq[i]);
+    }
+  } else {
+    for (int32_t i = 0; i < -prefix_len; ++i) {
+      ans |= Nucl2Int(*(seq - i)) << (2 * i);
+    }
+  }
+  assert(ans < (1 << (2 * prefix_len)));
+  return ans;
+}
+
+//Collects kmer stats for the region of length |reg_len|
+//If reg_len is negative -- go back in the string
+static
+void
+CollectKmerStat(const char* seq, int32_t reg_len, int32_t kmer_len, int32_t *stats) {
+  assert(kmer_len > 0);
+  assert(reg_len != 0);
+  memset(stats, 0, sizeof(int32_t) * (1 << (2 * kmer_len)));
+  if (reg_len > 0) {
+    for (int32_t i = 0; (i + kmer_len) <= reg_len; i = i + kmer_len) {
+      stats[Convert2Int(seq + i, kmer_len)]++;
+    }
+  } else {
+    for (int32_t i = 0; (i + kmer_len) <= -reg_len; i = i + kmer_len) {
+      stats[Convert2Int(seq - i, -kmer_len)]++;
+    }
+  }
+}
+
+bool enable_repeat_check = false;
+
+bool
+CheckTrivialDNA(const char* seq, int32_t remaining, int32_t offset) {
+  if (!enable_repeat_check)
+    return true;
+
+  //TODO configure trivial DNA analysis
+  static const int32_t SIZE_FACTOR = 6;
+  static const int32_t REPEAT_NUM = 5;
+  static const int32_t MIN_K = 2;
+  static const int32_t MAX_K = 5;
+
+  int32_t stats_buff[1 << (2 * MAX_K)];
+  for (int32_t k = MIN_K; k <= MAX_K; ++k) {
+    const int32_t possible_kmer_cnt = 1 << (2 * k);
+    int32_t reg_len = k * SIZE_FACTOR;
+
+    //exploring sequence to the right
+    for (int32_t shift = 0; shift < k; ++shift) {
+      if (reg_len + shift > remaining)
+        break;
+      CollectKmerStat(seq + shift, reg_len, k, stats_buff);
+      if (*std::max_element(stats_buff, stats_buff + possible_kmer_cnt) >= REPEAT_NUM) {
+        //char subbuff[reg_len + 1];
+        //memcpy(subbuff, seq + shift, reg_len);
+        //subbuff[reg_len] = '\0';
+        //fprintf(stderr, "Trivial DNA (k=%d) upstream\n", k);
+        //fprintf(stderr, "%s\n", subbuff);
+        return true;
+      }
+    }
+
+    //exploring sequence to the left
+    for (int32_t shift = 0; shift < k; ++shift) {
+      if (reg_len + shift > offset)
+        break;
+      CollectKmerStat(seq - shift - 1, -reg_len, k, stats_buff);
+      if (*std::max_element(stats_buff, stats_buff + possible_kmer_cnt) >= REPEAT_NUM) {
+        //char subbuff[reg_len + 1];
+        //memcpy(subbuff, seq - shift - reg_len, reg_len);
+        //subbuff[reg_len] = '\0';
+        //fprintf(stderr, "Trivial DNA (k=%d) downstream\n", k);
+        //fprintf(stderr, "%s\n", subbuff);
+        return true;
+      }
+    }
+  }
+  return false;
+}
+
+size_t MaskedPositions(const std::string &s) {
+    const char *c_str = s.c_str();
+    size_t total_masked = 0;
+    for (size_t i = 0; i < s.size(); ++i) {
+        if (CheckTrivialDNA(c_str, s.size() - i, i)) {
+            ++total_masked;
+        }
+    }
+    std::cout.precision(2);
+    std::cout << "Masked total " << total_masked << " (" << double(total_masked / s.size()) << "%) out of " << s.size() << std::endl;
+    return total_masked;
+}
 
 using namespace std;
 
 /*
-  basemap[] works by storing a very small array that maps a base to 
-  its complement, by dereferencing the array with the ASCII char's 
+  basemap[] works by storing a very small array that maps a base to
+  its complement, by dereferencing the array with the ASCII char's
   decimal value as the index
   (int) 'A' = 65;
   (int) 'C' = 67;
@@ -70,7 +192,7 @@ static bool is_mapped(const bam1_core_t *core) {
         return false;
     }
     if (core->flag & BAM_FSECONDARY) {
-    	return false;
+        return false;
     }
 
     return true;
@@ -101,6 +223,15 @@ samfile_t * open_alignment_file(std::string path) {
 
 int
 main (int argc, char **argv) {
+    if (argc < 3 || (argc > 3 && std::string(argv[3]) != "--ignore-microsatellites")) {
+        fprintf(stderr, "Usage: %s\n <alignment file (SAM/BAM)> <reference in FASTA> [--ignore-microsatellites]", argv[0]);
+    }
+
+    if (argc > 3) {
+        enable_repeat_check = true;
+        cout << "Microsatellite repeats around alignment differences will be checked" << endl;
+    }
+
     map<string, string> reference;
     // loadFasta
     FILE *in = fopen(argv[2], "r");
@@ -108,10 +239,10 @@ main (int argc, char **argv) {
     kseq_t *seq = kseq_init(f);
     int l = 0;
     while ((l=kseq_read(seq)) >= 0) {
-       reference[seq->name.s] = seq->seq.s;
-       string name = seq->name.s;
-       name.append("rc");
-       reference[name] = rc(seq->seq.s, strlen(seq->seq.s));
+        reference[seq->name.s] = seq->seq.s;
+        //MaskedPositions(std::string(seq->seq.s));
+        const string name = seq->name.s;
+        reference[name + "rc"] = rc(seq->seq.s, strlen(seq->seq.s));
     }
     kseq_destroy(seq);
     gzclose(f);
@@ -123,6 +254,10 @@ main (int argc, char **argv) {
         exit(1);
     }
     bam_header_t* head = fp->header; // sam header
+
+    //cout << id << "\t" << ref << "\t" << int(ceil(-1*idy/100*len)) << "\t" << idy << "\t0\t" << (isFwd == true ? seqLow : seqLen-seqHi) << "\t" << (isFwd == true ? seqHi : seqLen-seqLow) << "\t" << seqLen << "\t" <<  (isFwd == true ? 0 : 1) << "\t" << (isFwd == true ? refLo : refLen-refHigh) << "\t" << (isFwd == true ? refHigh : refLen-refLo) << "\t" << refLen << "\t" << len << "\t" << (seqHi-seqLow) << "\t" << (refHigh-refLo) << "\t" << matches << "\t" << errors << "\t" << idyMismatches << "\t" << indels << endl;
+    cout << "read_id\tref_id\t?-rounded_matches?\tidentity\t?0?\tquery_strand_start\tquery_strand_end\t?query_len?\treverse_strand\tref_strand_start\tref_strand_end\tref_len\talignment_len\tquery_span\tref_span\tmatches\terrors\tmismatch_identity\tindels" << endl;
+
     while (samread(fp, b) >= 0) {
         //Get bam core.
         const bam1_core_t *core = &b->core;
@@ -141,20 +276,23 @@ main (int argc, char **argv) {
         uint32_t refLo = core->pos + 1;
         uint32_t refHigh = bam_calend(core, cigar);
         uint32_t seqLow = 0;
-        uint32_t seqHi = core->l_qseq; 
+        uint32_t seqHi = core->l_qseq;
         uint32_t seqLen = core->l_qseq;
         bool isFwd = !(core->flag & BAM_FREVERSE);
 
         // now parse, we need both sequecnes for this
-        if (strlen(reference[ref].c_str()) <= 0) { 
-           fprintf(stderr, "Error: unknown reference sequence %s", ref.c_str());
-           exit(1);
+        if (strlen(reference[ref].c_str()) <= 0) {
+            fprintf(stderr, "Error: unknown reference sequence %s", ref.c_str());
+            exit(1);
         }
-        char *refSeq = (char*)reference[ref].c_str()+refLo-1;
+        assert(false);
+        assert(refLen == reference[ref].size());
+        const char * const refSeqStart = reference[ref].c_str();
+        const char *refSeq = refSeqStart+refLo-1;
         char *qrySeq = new char[core->l_qseq+1];
-        char *orig = qrySeq;
+        char const *qrySeqCleanup = qrySeq;
         for (int i = 0; i < core->l_qseq; i++) {
-          qrySeq[i] = bam_nt16_rev_table[bam1_seqi(bam1_seq(b), i)];
+            qrySeq[i] = bam_nt16_rev_table[bam1_seqi(bam1_seq(b), i)];
         }
         qrySeq[core->l_qseq]='\0';
         int errors = 0;
@@ -162,52 +300,61 @@ main (int argc, char **argv) {
         int indels = 0;
         uint32_t len = 0;
         for (int k = 0; k < core->n_cigar; ++k) {
+            uint32_t refPos = uint32_t(refSeq - refSeqStart);
+
             int cop = cigar[k] & BAM_CIGAR_MASK; // operation
             int cl = cigar[k] >> BAM_CIGAR_SHIFT; // length
             switch (cop) {
             // we don't care about clipping, not part of length
             case BAM_CSOFT_CLIP:
-                 if (k == 0) seqLow+=cl;
-                 else seqHi-=cl;
-                 qrySeq+=cl;
-                 break;
+                if (k == 0) seqLow+=cl;
+                else seqHi-=cl;
+                qrySeq+=cl;
+                break;
             case BAM_CHARD_CLIP:
-                 if (k == 0) seqLow+=cl;
-                 else seqHi-=cl;
-                 seqLen+=cl;
-                 seqHi+=cl;
-                 break;
+                if (k == 0) seqLow+=cl;
+                else seqHi-=cl;
+                seqLen+=cl;
+                seqHi+=cl;
+                break;
+
             // we don't care about matches either, not an error
             case BAM_CMATCH:
             case BAM_CEQUAL:
-            case BAM_CDIFF: 
-              for (int i = 0; i < cl; i++) {
-                 if (toupper(*refSeq) == toupper(*qrySeq)) {
-                    matches++;
-                 } else {
-                    errors++;
-                 }
-                 refSeq++;
-                 qrySeq++;
-             }
-             len+=cl;
-             break;
+            case BAM_CDIFF:
+                for (int i = 0; i < cl; i++) {
+                    if (toupper(*refSeq) == toupper(*qrySeq)) {
+                        matches++;
+                    } else {
+                        if (!CheckTrivialDNA(refSeq, refPos, refLen - refPos))
+                            errors++;
+                    }
+                    refSeq++;
+                    qrySeq++;
+                }
+                len+=cl;
+                break;
             case BAM_CINS:
-               errors+=cl;
-               indels+=cl;
-               qrySeq+=cl;
-               len+=cl;
-               break;
-            case BAM_CREF_SKIP:
-               refSeq+=cl;
-               len+=cl;
-               break;
+                if (!CheckTrivialDNA(refSeq, refPos, refLen - refPos)) {
+                    errors+=cl;
+                    indels+=cl;
+                }
+                qrySeq+=cl;
+                len+=cl;
+                break;
             case BAM_CDEL:
-               errors+=cl;
-               indels+=cl;
-               refSeq+=cl;
-               len+=cl;
-               break;
+                if (!CheckTrivialDNA(refSeq, refPos, refLen - refPos)) {
+                    errors+=cl;
+                    indels+=cl;
+                }
+                refSeq+=cl;
+                len+=cl;
+                break;
+
+            case BAM_CREF_SKIP:
+                refSeq+=cl;
+                len+=cl;
+                break;
             default:
                 cerr << "Error: unknown base " << cop << " of len " << cl << endl;
                 exit(1);
@@ -218,8 +365,8 @@ main (int argc, char **argv) {
         double idy = (1-((double) errors / len /*(seqHi-seqLow)*/ /*(refHigh - refLo + 1)*/)) * 100;
         double idyMismatches =  (1-((double) (errors-indels) / len /*(seqHi-seqLow)*/ /*(refHigh - refLo + 1)*/)) * 100;
         cout << id << "\t" << ref << "\t" << int(ceil(-1*idy/100*len)) << "\t" << idy << "\t0\t" << (isFwd == true ? seqLow : seqLen-seqHi) << "\t" << (isFwd == true ? seqHi : seqLen-seqLow) << "\t" << seqLen << "\t" <<  (isFwd == true ? 0 : 1) << "\t" << (isFwd == true ? refLo : refLen-refHigh) << "\t" << (isFwd == true ? refHigh : refLen-refLo) << "\t" << refLen << "\t" << len << "\t" << (seqHi-seqLow) << "\t" << (refHigh-refLo) << "\t" << matches << "\t" << errors << "\t" << idyMismatches << "\t" << indels << endl;
-        delete[] orig;
+        delete[] qrySeqCleanup;
     }
     samclose(fp);
-return 0;
+    return 0;
 }
