@@ -17,14 +17,19 @@ int32_t
 Nucl2Int(char nucl) {
   switch (nucl) {
     case 'a':
+    case 'A':
       return 0;
     case 'c':
+    case 'C':
       return 1;
     case 'g':
+    case 'G':
       return 2;
     case 't':
+    case 'T':
       return 3;
     default:
+      std::cerr << "Unexpected symbol " << nucl << std::endl;
       assert(false);
   }
 }
@@ -73,7 +78,7 @@ bool enable_repeat_check = false;
 bool
 CheckTrivialDNA(const char* seq, int32_t remaining, int32_t offset) {
   if (!enable_repeat_check)
-    return true;
+    return false;
 
   //TODO configure trivial DNA analysis
   static const int32_t SIZE_FACTOR = 6;
@@ -229,7 +234,9 @@ main (int argc, char **argv) {
 
     if (argc > 3) {
         enable_repeat_check = true;
-        cout << "Microsatellite repeats around alignment differences will be checked" << endl;
+        cerr << "Microsatellite repeats around alignment differences will be checked" << endl;
+    } else {
+        cerr << "No microsatellite repeats checked" << endl;
     }
 
     map<string, string> reference;
@@ -256,7 +263,7 @@ main (int argc, char **argv) {
     bam_header_t* head = fp->header; // sam header
 
     //cout << id << "\t" << ref << "\t" << int(ceil(-1*idy/100*len)) << "\t" << idy << "\t0\t" << (isFwd == true ? seqLow : seqLen-seqHi) << "\t" << (isFwd == true ? seqHi : seqLen-seqLow) << "\t" << seqLen << "\t" <<  (isFwd == true ? 0 : 1) << "\t" << (isFwd == true ? refLo : refLen-refHigh) << "\t" << (isFwd == true ? refHigh : refLen-refLo) << "\t" << refLen << "\t" << len << "\t" << (seqHi-seqLow) << "\t" << (refHigh-refLo) << "\t" << matches << "\t" << errors << "\t" << idyMismatches << "\t" << indels << endl;
-    cout << "read_id\tref_id\t?-rounded_matches?\tidentity\t?0?\tquery_strand_start\tquery_strand_end\t?query_len?\treverse_strand\tref_strand_start\tref_strand_end\tref_len\talignment_len\tquery_span\tref_span\tmatches\terrors\tmismatch_identity\tindels" << endl;
+    cout << "read_id\tref_id\t???\tidentity\t0!\tquery_strand_start\tquery_strand_end\tquery_len\treverse_strand\tref_strand_start\tref_strand_end\tref_len\talignment_len\tquery_span\tref_span\tmatches\terrors\tmismatch_identity\tindels" << endl;
 
     while (samread(fp, b) >= 0) {
         //Get bam core.
@@ -285,7 +292,6 @@ main (int argc, char **argv) {
             fprintf(stderr, "Error: unknown reference sequence %s", ref.c_str());
             exit(1);
         }
-        assert(false);
         assert(refLen == reference[ref].size());
         const char * const refSeqStart = reference[ref].c_str();
         const char *refSeq = refSeqStart+refLo-1;
@@ -326,8 +332,9 @@ main (int argc, char **argv) {
                     if (toupper(*refSeq) == toupper(*qrySeq)) {
                         matches++;
                     } else {
-                        if (!CheckTrivialDNA(refSeq, refPos, refLen - refPos))
+                        if (!CheckTrivialDNA(refSeq, refPos, refLen - refPos)) {
                             errors++;
+                        }
                     }
                     refSeq++;
                     qrySeq++;
