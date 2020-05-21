@@ -76,7 +76,7 @@ CollectKmerStat(const char* seq, int32_t reg_len, int32_t kmer_len, int32_t *sta
 bool enable_repeat_check = false;
 
 bool
-CheckTrivialDNA(const char* seq, int32_t remaining, int32_t offset) {
+CheckTrivialDNA(const char* const seq, const uint32_t remaining, const uint32_t offset) {
   if (!enable_repeat_check)
     return false;
 
@@ -89,12 +89,13 @@ CheckTrivialDNA(const char* seq, int32_t remaining, int32_t offset) {
   int32_t stats_buff[1 << (2 * MAX_K)];
   for (int32_t k = MIN_K; k <= MAX_K; ++k) {
     const int32_t possible_kmer_cnt = 1 << (2 * k);
-    int32_t reg_len = k * SIZE_FACTOR;
+    const int32_t reg_len = k * SIZE_FACTOR;
 
     //exploring sequence to the right
     for (int32_t shift = 0; shift < k; ++shift) {
       if (reg_len + shift > remaining)
         break;
+
       CollectKmerStat(seq + shift, reg_len, k, stats_buff);
       if (*std::max_element(stats_buff, stats_buff + possible_kmer_cnt) >= REPEAT_NUM) {
         //char subbuff[reg_len + 1];
@@ -128,7 +129,7 @@ size_t MaskedPositions(const std::string &s) {
     const char *c_str = s.c_str();
     size_t total_masked = 0;
     for (size_t i = 0; i < s.size(); ++i) {
-        if (CheckTrivialDNA(c_str, s.size() - i, i)) {
+        if (CheckTrivialDNA(c_str + i, s.size() - i, i)) {
             ++total_masked;
         }
     }
@@ -276,18 +277,20 @@ main (int argc, char **argv) {
             continue;
         }
 
-        string id = bam1_qname(b);
-        string ref = head->target_name[core->tid];
-        uint32_t* cigar = bam1_cigar(b);
-        uint32_t refLen = head->target_len[core->tid];
-        uint32_t refLo = core->pos + 1;
-        uint32_t refHigh = bam_calend(core, cigar);
+        const string id = bam1_qname(b);
+        //cerr << "Processing " << id << endl;
+        const string ref = head->target_name[core->tid];
+        const uint32_t* cigar = bam1_cigar(b);
+        const uint32_t refLen = head->target_len[core->tid];
+        const uint32_t refLo = core->pos + 1;
+        const uint32_t refHigh = bam_calend(core, cigar);
+        assert(refLo <= refHigh && refHigh <= refLen);
         uint32_t seqLow = 0;
         uint32_t seqHi = core->l_qseq;
         uint32_t seqLen = core->l_qseq;
-        bool isFwd = !(core->flag & BAM_FREVERSE);
+        const bool isFwd = !(core->flag & BAM_FREVERSE);
 
-        // now parse, we need both sequecnes for this
+        // now parse, we need both sequences for this
         if (strlen(reference[ref].c_str()) <= 0) {
             fprintf(stderr, "Error: unknown reference sequence %s", ref.c_str());
             exit(1);
@@ -306,17 +309,22 @@ main (int argc, char **argv) {
         int indels = 0;
         uint32_t len = 0;
         for (int k = 0; k < core->n_cigar; ++k) {
-            uint32_t refPos = uint32_t(refSeq - refSeqStart);
+            assert(refSeq >= refSeqStart);
+            uint32_t refPos(refSeq - refSeqStart);
+            assert(refPos <= refLen);
+            assert(refPos <= refHigh);
 
             int cop = cigar[k] & BAM_CIGAR_MASK; // operation
             int cl = cigar[k] >> BAM_CIGAR_SHIFT; // length
             switch (cop) {
             // we don't care about clipping, not part of length
+
             case BAM_CSOFT_CLIP:
                 if (k == 0) seqLow+=cl;
                 else seqHi-=cl;
                 qrySeq+=cl;
                 break;
+
             case BAM_CHARD_CLIP:
                 if (k == 0) seqLow+=cl;
                 else seqHi-=cl;
@@ -326,13 +334,17 @@ main (int argc, char **argv) {
 
             // we don't care about matches either, not an error
             case BAM_CMATCH:
+
             case BAM_CEQUAL:
+
             case BAM_CDIFF:
                 for (int i = 0; i < cl; i++) {
+                    assert(refSeq < refSeqStart + refLen);
+                    refPos = refSeq - refSeqStart;
                     if (toupper(*refSeq) == toupper(*qrySeq)) {
                         matches++;
                     } else {
-                        if (!CheckTrivialDNA(refSeq, refPos, refLen - refPos)) {
+                        if (!CheckTrivialDNA(refSeq, refLen - refPos, refPos)) {
                             errors++;
                         }
                     }
@@ -341,16 +353,18 @@ main (int argc, char **argv) {
                 }
                 len+=cl;
                 break;
+
             case BAM_CINS:
-                if (!CheckTrivialDNA(refSeq, refPos, refLen - refPos)) {
+                if (!CheckTrivialDNA(refSeq, refLen - refPos, refPos)) {
                     errors+=cl;
                     indels+=cl;
                 }
                 qrySeq+=cl;
                 len+=cl;
                 break;
+
             case BAM_CDEL:
-                if (!CheckTrivialDNA(refSeq, refPos, refLen - refPos)) {
+                if (!CheckTrivialDNA(refSeq, refLen - refPos, refPos)) {
                     errors+=cl;
                     indels+=cl;
                 }
